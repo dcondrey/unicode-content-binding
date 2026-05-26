@@ -1,0 +1,532 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- name="GENERATOR" content="github.com/mmarkdown/mmark Mmark Markdown Processor - mmark.miek.nl" -->
+<rfc version="3" ipr="trust200902" docName="draft-condrey-content-binding-latest" submissionType="independent" category="info" xml:lang="en" xmlns:xi="http://www.w3.org/2001/XInclude" indexInclude="true">
+
+<front>
+<title abbrev="Content Binding">A Conformant Mechanism for Content Binding in Text Streams</title><seriesInfo value="draft-condrey-content-binding-latest" stream="independent" status="informational" name="Internet-Draft"></seriesInfo>
+<author initials="D." surname="Condrey" fullname="David Condrey"><organization>WritersLogic Inc.</organization><address><postal><street></street>
+</postal><email>david@writerslogic.com</email>
+</address></author><date year="2026" month="May" day="26"></date>
+<area>ART</area>
+<workgroup>Individual Submission</workgroup>
+<keyword>unicode</keyword>
+<keyword>content binding</keyword>
+<keyword>plain text</keyword>
+<keyword>metadata</keyword>
+<keyword>provenance</keyword>
+
+<abstract>
+<t>This document proposes a conformant mechanism for binding metadata to
+plain text streams using boundary-delimited transport. The mechanism
+uses existing ASCII characters to establish a text/non-text boundary,
+requiring no new code points and no changes to existing Unicode text
+processing algorithms. It defines a delimiter format, a parsing
+algorithm, a canonicalization procedure, and correctness criteria
+sufficient for two independent implementations to interoperate
+without coordination.</t>
+</abstract>
+
+</front>
+
+<middle>
+
+<section anchor="introduction"><name>Introduction</name>
+<t>This document specifies a wire format for binding opaque payloads -- signatures, provenance manifests, AI-generated-content markers -- to plain text streams using boundary-delimited transport: a visible ASCII start delimiter, an optional header section, a Base64-encoded payload, and a matching end delimiter. The text preceding the block is preserved byte-for-byte, satisfying what this document calls the <strong>Text Self-Containment Invariant</strong>: text MUST remain semantically complete and self-contained in the absence of any binding mechanism. OpenPGP cleartext signatures <xref target="RFC9580"></xref> and PEM-encoded cryptographic objects <xref target="RFC7468"></xref> have used this pattern (Class 2, boundary-delimited transport) for decades. The alternative of hiding metadata inside the text using invisible or repurposed Unicode characters (Class 1, in-band encoding) is structurally indistinguishable from steganographic attacks such as Trojan Source <xref target="TROJAN-SOURCE"></xref>, GlassWorm <xref target="GLASSWORM"></xref>, and whitespace-replacement techniques <xref target="HELLMEIER2025"></xref>; Class 1 is rejected throughout this document.</t>
+</section>
+
+<section anchor="prior-art"><name>Prior Art</name>
+<t>Five existing systems occupy nearby points in the design space:</t>
+
+<ul spacing="compact">
+<li><strong>OpenPGP cleartext signatures</strong> <xref target="RFC9580"></xref>, 1991. Fixed in-band ASCII delimiter (<tt>-----BEGIN PGP SIGNED MESSAGE-----</tt>), Base64 payload, visible, survives copy/paste. Direct precedent.</li>
+<li><strong>PEM / PKIX / CMS</strong> <xref target="RFC7468"></xref>, originally 1993. Fixed in-band ASCII delimiter with payload-type label (<tt>-----BEGIN CERTIFICATE-----</tt>, etc.), Base64 payload, visible, survives copy/paste. Direct precedent.</li>
+<li><strong>MIME multipart</strong> <xref target="RFC2046"></xref>, 1996. Boundary token declared out-of-band in a <tt>Content-Type</tt> header. Does not survive copy/paste because the declaring header is lost.</li>
+<li><strong>DKIM</strong> <xref target="RFC6376"></xref>, 2007. No body delimiter; signature lives in an SMTP header field. Does not survive copy/paste.</li>
+<li><strong>Unicode interlinear annotation characters</strong> (U+FFF9-U+FFFB), Unicode 3.0 (1999). Dedicated Cf code points delimit annotated ranges in-band. Invisible to the user, not default-ignorable.</li>
+</ul>
+<t>This mechanism follows the PGP/PEM pattern but is payload-agnostic (no label-to-type binding) and defines an explicit header section. The deliberate omission of a type label in the delimiter is not cosmetic; it is a decoupling decision. PEM labels (<tt>CERTIFICATE</tt>, <tt>PUBLIC KEY</tt>, etc.) encode a registered payload type, which binds the transport format to IANA's PKIX label registry <xref target="RFC7468"></xref>: every new payload type requires a new registered label before any implementation can emit it. Content binding inverts this dependency. The delimiter identifies the transport; the payload identifies itself (via headers or self-describing encodings such as CBOR or CMS). Higher-level protocols can therefore adopt the transport without registering anything, and new payload types can be deployed without coordinating a registry update.</t>
+<t>ASCII-art delimiters invite an aesthetic objection: why visible fences in 2026? The answer is empirical. Every alternative has been tried -- MIME multipart boundaries (lost when the declaring <tt>Content-Type</tt> header is stripped), DKIM header fields (lost on forwarding), Unicode in-band markers (invisible, indistinguishable from adversarial injection) -- and ASCII-art delimiters remain the only framing device that survives copy-paste, plain-text storage, and transfer through arbitrary intermediaries without loss of structure. Three decades of PGP and PEM deployment are the evidence.</t>
+<t>This specification is a transport mechanism and is orthogonal to the question of whether Unicode should recognize AI-generated content markers at the character level. In-band (Class 1) approaches to that recognition question are rejected throughout this document on security grounds (Section 1); the boundary-delimited transport defined here is complementary to, not competing with, any future character-level mechanism.</t>
+</section>
+
+<section anchor="requirements"><name>Requirements</name>
+<t>In this document, the key words &quot;MUST&quot;, &quot;MUST NOT&quot;, &quot;SHOULD&quot;, and &quot;MAY&quot; are to be interpreted as described in BCP 14 <xref target="RFC2119"></xref> <xref target="RFC8174"></xref> when, and only when, they appear in all capitals, as shown here.</t>
+<t>Terms used throughout:</t>
+
+<ul spacing="compact">
+<li><strong>Text/non-text boundary</strong>: The point in a text stream at which text processing ends and opaque data begins. Established by a delimiter (Section 4.2). Content before the boundary is text; content after it, up to the corresponding end delimiter, is opaque payload.</li>
+<li><strong>Content binding block</strong>: A region demarcated by a start delimiter and an end delimiter, containing an optional header section and a Base64-encoded payload.</li>
+<li><strong>Aware implementation</strong>: Software that recognizes content binding blocks and processes them according to this specification.</li>
+<li><strong>Unaware implementation</strong>: Software without explicit content binding support. Unaware implementations treat the block as ordinary text.</li>
+</ul>
+<t>A conformant mechanism must satisfy:</t>
+
+<ol spacing="compact">
+<li>No repurposing of existing Unicode characters outside their defined semantics.</li>
+<li>The block is logically outside the text for Unicode processing: it must not participate in grapheme cluster determination, bidirectional processing, line breaking, normalization, collation, or default casing. Unaware implementations that treat it as an ordinary paragraph are acceptable.</li>
+<li>Survives plain-text operations: copy, paste, transfer, and plain-text storage.</li>
+<li>Unambiguously detectable by aware implementations.</li>
+<li>Degrades gracefully in unaware implementations: text preserved verbatim, block visible rather than silently stripped.</li>
+<li>Payload-agnostic via a standard binary encoding (Base64).</li>
+<li>Clearly distinguishable from adversarial content manipulation.</li>
+</ol>
+<t>Payload contents are outside the scope of this document.</t>
+</section>
+
+<section anchor="specification"><name>Specification</name>
+
+<section anchor="general-structure"><name>General Structure</name>
+<t>A text stream may contain zero or more content binding blocks. The ABNF grammar (Section 4.6.1) defines the structure: <tt>text-content *(binding-block [text-content])</tt>. A block may appear at the start of the stream, at the end, or between regions of text. Each block consists of a start delimiter, an optional header section, a Base64-encoded payload (Section 4 of <xref target="RFC4648"></xref>; line-wrapped at 76 characters per Section 6.8 of <xref target="RFC2045"></xref>), and an end delimiter. Header semantics are defined by higher-level protocols; this document defines only the syntax.</t>
+<t>Aware implementations MUST NOT display the raw Base64 payload as if it were text content intended for the user, and SHOULD provide a visual indication that a block is present (e.g., a &quot;content credentials attached&quot; indicator).</t>
+<figure><name>Data flow through a content binding block.
+</name>
+<sourcecode type="ascii-art"><![CDATA[  producer                                            consumer
+  --------                                            --------
+  text  --+                                       +-->  text
+          |                                       |
+          +--> -----BEGIN CONTENT BINDING-----    |
+          |    [optional headers]                 |
+  payload +--> [Base64 payload]                   +-->  payload
+               -----END CONTENT BINDING-----
+]]></sourcecode>
+</figure>
+<t>A concrete example with a hypothetical provenance manifest:</t>
+
+<artwork><![CDATA[The quick brown fox jumps over
+the lazy dog.
+
+-----BEGIN CONTENT BINDING-----
+Type: application/provenance-manifest+cbor
+
+dGhpcyBpcyBhIHBsYWNlaG9sZGVyIGZvciBh
+aWZlc3QgdGhhdCB3b3VsZCBub3JtYWxseSBi
+eXRlcyBvZiBCYXNlNjQtZW5jb2RlZCBDQk9S
+-----END CONTENT BINDING-----
+]]></artwork>
+</section>
+
+<section anchor="primary-mechanism-ascii-delimiters-no-new-code-points"><name>Primary Mechanism: ASCII Delimiters (No New Code Points)</name>
+<t>The delimiters are <tt>-----BEGIN CONTENT BINDING-----</tt> and <tt>-----END CONTENT BINDING-----</tt>.</t>
+<t>Delimiter matching MUST be byte-for-byte and case-sensitive. The delimiter MUST occupy an entire line, with no leading or trailing characters other than an optional CR before LF. Visually similar code points (en-dash U+2013, em-dash U+2014, minus sign U+2212) MUST NOT match the ASCII hyphen-minus. Per-line matching needs no lookahead; malformed-block recovery (Section 4.6.2, step 7) rewinds to the recorded block-start, but that is recovery, not detection.</t>
+<t>Normative rules:</t>
+
+<ul spacing="compact">
+<li>Each delimiter MUST appear on its own line. The start delimiter MUST be preceded by a blank line (or appear at the beginning of the text stream). The end delimiter MUST be followed by end-of-text, a blank line, or another start delimiter.</li>
+<li>Line endings within the content binding block (delimiters, headers, and Base64 payload) MUST use LF (U+000A). Implementations MUST accept CRLF and normalize to LF during parsing. The text content preceding the block MAY use any line-ending convention.</li>
+<li>The payload region contains an optional header section followed by Base64-encoded data. Headers, if present, are lines of the form <tt>Name: value</tt> using only printable ASCII, terminated by a blank line before the Base64 data. The <tt>header-name</tt> grammar (Section 4.6.1) admits any printable ASCII character except colon; this is deliberately more permissive than MIME tokens, so higher-level protocols with their own naming conventions can use content binding as a transport. Higher-level protocols MAY restrict header names further within their own namespace.</li>
+<li>Implementations MUST support multiple content binding blocks in a single text stream.</li>
+<li>Implementations MUST NOT modify the text content preceding the block.</li>
+<li>Aware implementations MUST NOT present the content binding block as ordinary text content and SHOULD provide a visual indication of its presence.</li>
+</ul>
+<t>The delimiter string is theoretically possible in ordinary text, but PGP has shared this risk for three decades without a known collision.</t>
+</section>
+
+<section anchor="requirements-satisfaction"><name>Requirements Satisfaction</name>
+<t>The mechanism satisfies all seven requirements in Section 3:</t>
+
+<ul spacing="compact">
+<li><em>Req 1 (no repurposing)</em>: ASCII characters are used in their ordinary capacity.</li>
+<li><em>Req 2 (no adverse text-processing effect)</em>: aware implementations exclude the block from grapheme, bidi, line-break, normalization, collation, and casing operations (Unicode Standard Annexes #9, #14, #15, #29 and UTS #10 <xref target="UNICODE"></xref>); unaware implementations see it as an ordinary ASCII paragraph.</li>
+<li><em>Req 3 (survives plain-text operations)</em>: every character is ASCII and normalization-invariant, as PGP and PEM have demonstrated for decades.</li>
+<li><em>Req 4 (unambiguously detectable)</em>: exact byte-for-byte string match.</li>
+<li><em>Req 5 (graceful degradation)</em>: the block is visible in unaware implementations (like PGP and PEM, unlike DKIM).</li>
+<li><em>Req 6 (payload-agnostic)</em>: opaque Base64; semantics are delegated to higher-level protocols.</li>
+<li><em>Req 7 (distinguishable from adversarial manipulation)</em>: visibility (Section 5.3) combined with exact-match rejection of lookalike delimiters (Section 5.4).</li>
+</ul>
+</section>
+
+<section anchor="normalization"><name>Normalization</name>
+<t>Every character in the delimiters, headers, and Base64 payload is ASCII, and all ASCII code points are invariant under NFC, NFD, NFKC, and NFKD (Unicode Standard Annex #15 <xref target="UNICODE"></xref>). A content binding block therefore survives any clipboard, storage, or transport layer that applies Unicode normalization. Aware implementations MUST detect and extract the block <em>before</em> applying any normalization or other text transformation to the surrounding text content; otherwise a transformation applied to the stream could alter the delimiters' line context.</t>
+</section>
+
+<section anchor="canonicalization-of-text-content"><name>Canonicalization of Text Content</name>
+<t>Higher-level protocols that sign or digest text content need a deterministic canonical form; without one, the same logical text produces different byte sequences across systems and verification fails. The canonical form of the text content is:</t>
+
+<ol spacing="compact">
+<li>Take the text content preceding the first content binding block, or the entire stream if no block is present.</li>
+<li>Replace every CR LF (U+000D U+000A) and bare CR (U+000D) with a single LF (U+000A).</li>
+<li>Preserve any leading UTF-8 BOM (U+FEFF). Higher-level protocols that want to exclude the BOM MUST specify that exclusion themselves.</li>
+<li>Apply no other modification to the code points. Implementations MUST NOT apply Unicode normalization (NFC, NFD, NFKC, NFKD) as part of canonicalization: applying a normalization at the transport layer would silently alter the text and violate C1. Because some systems silently normalize on clipboard or storage (macOS applies NFD; some databases apply NFC), higher-level protocols that compute signatures SHOULD specify a normalization form (typically NFC) and apply it at both signing and verification time.</li>
+<li>Encode the resulting code point sequence as UTF-8.</li>
+</ol>
+<t>Content binding blocks themselves MUST NOT appear in the canonical form; the signature is computed over the text content only, so including the block would create a circular dependency. If multiple blocks are present, each block's signature covers the same canonical content (the text preceding the first block). Blocks MUST NOT sign each other; higher-level protocols that need chained signatures MUST define their own sequencing rules inside the payload.</t>
+</section>
+
+<section anchor="detection-and-parsing"><name>Detection and Parsing</name>
+<t>This section gives the formal grammar and normative algorithm for detecting and parsing content binding blocks.</t>
+
+<section anchor="abnf-grammar"><name>ABNF Grammar</name>
+<t>ABNF grammar <xref target="RFC5234"></xref> for a well-formed content binding block:</t>
+
+<sourcecode type="abnf"><![CDATA[text-stream       = text-content *(binding-block [text-content])
+
+; text-content: any sequence of Unicode characters not
+; containing a start-delimiter at the beginning of a line.
+; This production cannot be expressed in ABNF; its boundaries
+; are defined by the detection algorithm in Section 4.6.2.
+
+binding-block     = blank-line start-line
+                    [header-section] payload-section end-line
+
+start-line        = start-delimiter LF
+end-line          = end-delimiter LF / end-delimiter EOF
+
+start-delimiter   = %s"-----BEGIN CONTENT BINDING-----"
+end-delimiter     = %s"-----END CONTENT BINDING-----"
+
+header-section    = 1*header-line blank-line
+header-line       = header-name ":" SP header-value LF
+header-name       = 1*(%x21-39 / %x3B-7E)     ; printable ASCII except ":"
+header-value      = *(%x20-7E)                  ; printable ASCII and SP
+blank-line        = LF
+
+payload-section   = *base64-line [base64-last]
+base64-line       = 1*76base64-char LF
+base64-last       = 1*76(base64-char / pad) LF
+base64-char       = ALPHA / DIGIT / "+" / "/"
+pad               = "="
+
+LF                = %x0A
+SP                = %x20
+EOF               = ""                          ; end of stream
+]]></sourcecode>
+<t>The <tt>text-content</tt> production cannot be expressed purely in ABNF; its boundaries are defined operationally by the detection algorithm in Section 4.6.2. Implementations MUST accept CR LF (%x0D %x0A) in place of LF in all productions and normalize to LF during parsing.</t>
+<t>A leading UTF-8 BOM (U+FEFF) is part of the text content. Implementations MUST NOT strip it before parsing and MUST preserve it in the canonical form (Section 4.5). Some I/O libraries silently strip BOMs on read; applications that use such libraries must re-introduce the BOM or bypass the stripping.</t>
+</section>
+
+<section anchor="detection-algorithm"><name>Detection Algorithm</name>
+<t>Normative algorithm:</t>
+
+<ol spacing="compact">
+<li>Initialize state to SCANNING. Set block-start to null.</li>
+<li>Read the next line from the text stream. If end-of-stream, go to step 8.</li>
+<li>If state is SCANNING and the line matches <tt>start-delimiter</tt> exactly, set state to IN_BLOCK, record block-start position, initialize an empty header list and an empty payload buffer, set sub-state to HEADERS, and go to step 2.</li>
+<li>If state is IN_BLOCK and sub-state is HEADERS, apply the first matching rule: (4.1) if the line is blank (empty or LF only), set sub-state to PAYLOAD and go to step 2; (4.2) if the line matches <tt>header-name &quot;:&quot; SP header-value</tt>, append it to the header list and go to step 2; (4.3) otherwise, set sub-state to PAYLOAD and process this line as step 5.</li>
+<li>If state is IN_BLOCK and sub-state is PAYLOAD, apply the first matching rule: (5.1) if the line matches <tt>end-delimiter</tt> exactly, go to step 6; (5.2) if the line contains only characters in the Base64 alphabet, padding, and whitespace, append it to the payload buffer and go to step 2; (5.3) otherwise, the block is malformed and go to step 7. The lenient handling of whitespace in 5.2 is consistent with Section 6.8 of <xref target="RFC2045"></xref>; the ABNF grammar describes the canonical form for conformant producers and does not constrain lenient parsing by consumers.</li>
+<li>Block complete. Decode the payload buffer as Base64 (Section 4 of <xref target="RFC4648"></xref>). If decoding fails, the block is malformed; go to step 7. Otherwise, emit a parsed binding block (headers, decoded payload), set state to SCANNING, and go to step 2.</li>
+<li>Malformed block. Discard accumulated headers and payload buffer. Treat all content from block-start through the current position as ordinary text. Set state to SCANNING. Go to step 2.</li>
+<li>End of stream. If state is IN_BLOCK, the block is unclosed; treat all content from block-start onward as ordinary text. Emit any accumulated text content. Terminate.</li>
+</ol>
+<t>In all cases, the text content preceding and between binding blocks is preserved unmodified.</t>
+</section>
+
+<section anchor="error-conditions"><name>Error Conditions</name>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Detection</th>
+<th>Required behavior</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>Unclosed block</td>
+<td>End-of-stream reached after start-delimiter without matching end-delimiter</td>
+<td>Treat block-start through end-of-stream as ordinary text</td>
+</tr>
+
+<tr>
+<td>Invalid Base64</td>
+<td>Characters outside Base64 alphabet, padding, and whitespace in payload region</td>
+<td>Reject block; preserve all text verbatim</td>
+</tr>
+
+<tr>
+<td>Truncated Base64</td>
+<td>Valid Base64 characters but incorrect padding</td>
+<td>Reject block; preserve all text verbatim</td>
+</tr>
+
+<tr>
+<td>Nested start</td>
+<td>start-delimiter appears inside an open block's payload region</td>
+<td>Treat as malformed payload; reject block</td>
+</tr>
+
+<tr>
+<td>Empty payload</td>
+<td>No Base64 lines between headers and end-delimiter</td>
+<td>Valid; block carries empty payload</td>
+</tr>
+
+<tr>
+<td>Non-ASCII header</td>
+<td>Code points outside U+0020-U+007E in header-name or header-value</td>
+<td>Reject block; preserve all text verbatim</td>
+</tr>
+
+<tr>
+<td>Missing blank line</td>
+<td>Header lines not terminated by blank line before payload</td>
+<td>Parser treats first non-header, non-blank line as payload start (lenient)</td>
+</tr>
+</tbody>
+</table></section>
+</section>
+
+<section anchor="test-vectors"><name>Test Vectors</name>
+<t>Test vectors for correct parsing and canonicalization. Two implementations that agree on these outputs are interoperable.</t>
+<t><strong>Vector 1: Single block, no headers.</strong></t>
+<t>Input (LF line endings):</t>
+
+<artwork><![CDATA[Hello, world.
+This is a test.
+
+-----BEGIN CONTENT BINDING-----
+
+SGVsbG8=
+-----END CONTENT BINDING-----
+]]></artwork>
+<t>Expected parse result:</t>
+
+<ul spacing="compact">
+<li>Text content: <tt>Hello, world.\nThis is a test.</tt> (29 bytes)</li>
+<li>Blocks: 1, no headers, payload = <tt>Hello</tt> (5 bytes)</li>
+<li>Trailing text: (empty)</li>
+</ul>
+<t>Canonical form:</t>
+
+<ul spacing="compact">
+<li>UTF-8 hex: <tt>48656c6c6f2c20776f726c642e0a54686973206973206120746573742e</tt></li>
+<li>SHA-256: <tt>02b5eda2f3782995430bba0bb2c650fe6f872ae9b253b616da17e81a297c9f43</tt></li>
+</ul>
+<t><strong>Vector 2: CRLF normalization.</strong></t>
+<t>Same input as Vector 1 but with CR LF (0D 0A) line endings throughout. The canonical form MUST produce the same UTF-8 hex and SHA-256 as Vector 1 after CR LF is normalized to LF.</t>
+<t><strong>Vector 3: Malformed block (invalid Base64).</strong></t>
+<t>Input:</t>
+
+<artwork><![CDATA[Some text.
+
+-----BEGIN CONTENT BINDING-----
+
+Not valid base64!@#$
+-----END CONTENT BINDING-----
+]]></artwork>
+<t>Expected parse result:</t>
+
+<ul spacing="compact">
+<li>Text: <tt>Some text.</tt> (10 bytes)</li>
+<li>Blocks: 0 (rejected as malformed)</li>
+<li>Block region preserved as ordinary text</li>
+</ul>
+<t>Malformed blocks MUST NOT be interpreted as valid. No partial decoding or recovery heuristics.</t>
+<t><strong>Vector 4: Headers, multiple blocks, interleaved text.</strong></t>
+<t>Input:</t>
+
+<artwork><![CDATA[First paragraph.
+
+-----BEGIN CONTENT BINDING-----
+Type: application/provenance-manifest+cbor
+
+cHJvdmVuYW5jZSBtYW5pZmVzdCBwbGFj
+ZWhvbGRlcg==
+-----END CONTENT BINDING-----
+
+Second paragraph.
+
+-----BEGIN CONTENT BINDING-----
+Type: application/signature
+
+ZGlnaXRhbCBzaWduYXR1cmUgcGxhY2Vo
+b2xkZXI=
+-----END CONTENT BINDING-----
+]]></artwork>
+<t>Expected parse result:</t>
+
+<ul spacing="compact">
+<li>Text: <tt>First paragraph.</tt> (16 bytes)</li>
+<li>Block 1: provenance-manifest+cbor, 31 bytes</li>
+<li>Trailing: <tt>Second paragraph.</tt></li>
+<li>Block 2: signature, 28 bytes</li>
+</ul>
+<t>Canonical form of text content (Section 4.5):</t>
+
+<ul spacing="compact">
+<li>UTF-8 hex: <tt>4669727374207061726167726170682e</tt></li>
+<li>SHA-256: <tt>98ea01bc109a52fdf7145c10c648e8b27b8ebc877aaa79405f20b044ecfcacaa</tt></li>
+</ul>
+<t>Two independent reference implementations (Python and Rust) sharing no code, built against the normative algorithm in Section 4.6.2, are available at <eref target="https://github.com/writerslogic/unicode-content-binding"/>. Both produce identical parse results for the test vectors above, satisfying C2 and C3.</t>
+</section>
+</section>
+
+<section anchor="security-considerations"><name>Security Considerations</name>
+
+<section anchor="security-model"><name>Security Model</name>
+<t>The content binding mechanism provides no authenticity, integrity, or confidentiality guarantees. It defines only a transport for associating opaque data with text content. Authenticity and integrity MUST be established by higher-level protocols operating on the decoded payload. An attacker can construct a syntactically valid block with arbitrary payload content.</t>
+</section>
+
+<section anchor="threat-model"><name>Threat Model</name>
+<t>The mechanism operates in an environment where an attacker has full control over the text stream.</t>
+<table>
+<thead>
+<tr>
+<th>Threat</th>
+<th>Mit.</th>
+<th>By</th>
+<th>Notes</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>T1: Injection</td>
+<td>No</td>
+<td>HLP</td>
+<td>Anyone can construct a valid block. Authentication lives in the payload, not the delimiter.</td>
+</tr>
+
+<tr>
+<td>T2: Removal</td>
+<td>No</td>
+<td>HLP</td>
+<td>Stripping a block is trivial and silent. Protocol must reference expected bindings so absence is detectable.</td>
+</tr>
+
+<tr>
+<td>T3: Reordering</td>
+<td>No</td>
+<td>HLP</td>
+<td>Enforce in payload if ordering matters.</td>
+</tr>
+
+<tr>
+<td>T4: Spoofing</td>
+<td><strong>Yes</strong></td>
+<td>Mech</td>
+<td>The one threat this layer closes. Exact byte match; en-dash, em-dash, minus sign all rejected.</td>
+</tr>
+
+<tr>
+<td>T5: Text mod</td>
+<td>Partial</td>
+<td>Both</td>
+<td>C1 preserves text byte-for-byte. Detecting tampering requires the payload signature, not the mechanism.</td>
+</tr>
+
+<tr>
+<td>T6: Payload mod</td>
+<td>No</td>
+<td>HLP</td>
+<td>Same as any Base64 blob: integrity via signatures.</td>
+</tr>
+
+<tr>
+<td>T7: Trailing text</td>
+<td>No</td>
+<td>HLP+UI</td>
+<td>The most subtle attack. Signature covers text before first block only; appended text looks continuous. UI SHOULD mark the boundary.</td>
+</tr>
+
+<tr>
+<td>T8: Replay</td>
+<td>No</td>
+<td>HLP</td>
+<td>Bind signatures to document identity. Without that, any document with identical text validates.</td>
+</tr>
+</tbody>
+</table></section>
+
+<section anchor="visibility-as-a-security-property"><name>Visibility as a Security Property</name>
+<t>The mechanism's defense against confusion with adversarial text manipulation is its visibility (Section 1). A content binding block is visible by default: unaware implementations render it as ordinary text, aware implementations acknowledge it (e.g., collapsed to an indicator). In either case the user can see that metadata is present, and an attacker cannot inject a block without producing a visible artifact. In-band encoding schemes have no analogous property because their entire attack surface is invisible.</t>
+</section>
+
+<section anchor="confusable-and-homoglyph-concerns"><name>Confusable and Homoglyph Concerns</name>
+<t>The ASCII hyphen-minus U+002D in the delimiter has visual lookalikes in Unicode (en-dash U+2013, em-dash U+2014, minus sign U+2212, and others) that an attacker could use to construct a spoofed block. The byte-for-byte matching rule in Section 4.2 closes this avenue: lookalikes are rejected and no lookalike-to-ASCII normalization is performed before comparison.</t>
+</section>
+
+<section anchor="payload-security"><name>Payload Security</name>
+<t>Payload security is outside the scope of this document. Base64 encoding confines the payload region to printable ASCII, preventing in-band injection of control characters or bidirectional overrides <xref target="UNICODE"></xref>. Implementations that decode a payload MUST treat the result as untrusted input.</t>
+</section>
+</section>
+
+<section anchor="compatibility"><name>Compatibility</name>
+<t>The mechanism does not change the meaning of any existing text. The exact string <tt>-----BEGIN CONTENT BINDING-----</tt> does not appear in any public code repository (GitHub, as of 2026), any IANA or <xref target="RFC7468"></xref> label registry, or any known natural-language corpus. PGP, SSH, PEM, and content binding blocks coexist unambiguously because they are distinguished by label, and the &quot;CONTENT BINDING&quot; label is disjoint from the RFC 7468 registry (which covers PEM-type encodings of DER/ASN.1 structures).</t>
+</section>
+
+<section anchor="conformance"><name>Conformance</name>
+
+<section anchor="correctness-criteria"><name>Correctness Criteria</name>
+<t>An implementation is correct if and only if it satisfies all of these properties:</t>
+<t><strong>C1. Text preservation.</strong> The text content preceding and between content binding blocks MUST be preserved byte-for-byte, including any leading UTF-8 BOM. Extracting the text content and encoding it as UTF-8 MUST produce a byte sequence identical to the canonical form of the original text content (Section 4.5).</t>
+<t><strong>C2. Deterministic boundary detection.</strong> Given the same input text stream, all conformant implementations MUST identify the same text/non-text boundaries at the same positions. Boundary detection MUST NOT depend on locale, platform, configuration, or payload content.</t>
+<t><strong>C3. Deterministic parsing.</strong> Given the same input text stream, all conformant implementations MUST produce the same parse result: the same text content, the same number of blocks, the same headers, and the same decoded payload bytes.</t>
+<t><strong>C4. Payload opacity.</strong> An implementation MUST NOT interpret, transform, validate, or act on the decoded payload.</t>
+<t><strong>C5. All-or-nothing rejection.</strong> A malformed block MUST be rejected as a whole. Implementations MUST NOT partially decode the payload, extract a subset of headers, or interpret any portion of a malformed block as valid. On rejection, the entire region from start-delimiter through the point of failure MUST be treated as ordinary text (Section 4.6.3).</t>
+<t><strong>C6. Round-trip stability.</strong> Parsing a text stream, extracting the text content, and re-appending the same content binding blocks MUST produce a text stream that parses identically to the original.</t>
+</section>
+
+<section anchor="conformance-requirements"><name>Conformance Requirements</name>
+<t>A conformant aware implementation MUST satisfy correctness criteria C1 through C6 (Section 7.1), using the delimiter strings from Section 4.2, the detection algorithm from Section 4.6.2, and the error handling from Section 4.6.3.</t>
+</section>
+</section>
+
+<section anchor="summary"><name>Summary</name>
+<t>The mechanism is intended for protocol designers who need to bind signed or opaque data to plain text in environments where out-of-band metadata channels (MIME headers, HTTP headers, file-format wrappers) are unavailable or unreliable. Two independent reference implementations exist at the URL in Section 4.7. Feedback is welcome via the IETF mailing list.</t>
+</section>
+
+<section anchor="iana-considerations"><name>IANA Considerations</name>
+<t>This document has no IANA actions.</t>
+</section>
+
+</middle>
+
+<back>
+<references><name>References</name>
+<references><name>Normative References</name>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.2045.xml"/>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.2119.xml"/>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.4648.xml"/>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.5234.xml"/>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.8174.xml"/>
+</references>
+<references><name>Informative References</name>
+<reference anchor="GLASSWORM" target="https://www.koi.ai/blog/glassworm-first-self-propagating-worm-using-invisible-code-hits-openvsx-marketplace">
+  <front>
+    <title>GlassWorm: First Self-Propagating Worm Using Invisible Code Hits OpenVSX Marketplace</title>
+    <author fullname="Idan Dardikman">
+      <organization>Koi Security</organization>
+    </author>
+    <date year="2025" month="October" day="18"></date>
+  </front>
+</reference>
+<reference anchor="HELLMEIER2025" target="">
+  <front>
+    <title>A Hidden Digital Text Watermarking Method Using Unicode Whitespace Replacement</title>
+    <author fullname="M. Hellmeier"></author>
+    <author fullname="H. Qarawlus"></author>
+    <author fullname="H. Norkowski"></author>
+    <author fullname="F. Howar"></author>
+    <date year="2025"></date>
+  </front>
+  <seriesInfo name="HICSS" value="58"></seriesInfo>
+</reference>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.2046.xml"/>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.6376.xml"/>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.7468.xml"/>
+<xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.9580.xml"/>
+<reference anchor="TROJAN-SOURCE" target="https://trojansource.codes/">
+  <front>
+    <title>Trojan Source: Invisible Vulnerabilities</title>
+    <author fullname="N. Boucher"></author>
+    <author fullname="R. Anderson"></author>
+    <date year="2023" month="August"></date>
+  </front>
+  <refcontent>32nd USENIX Security Symposium</refcontent>
+</reference>
+<reference anchor="UNICODE" target="https://www.unicode.org/versions/Unicode17.0.0/">
+  <front>
+    <title>The Unicode Standard, Version 17.0.0 -- Core Specification</title>
+    <author>
+      <organization>The Unicode Consortium</organization>
+    </author>
+    <date year="2025" month="September" day="9"></date>
+  </front>
+</reference>
+</references>
+</references>
+
+</back>
+
+</rfc>
