@@ -1,6 +1,6 @@
 {
   "magic": "E!vIA5L86J2I",
-  "timestamp": "2026-09-01T02:30:03.778163+00:00",
+  "timestamp": "2026-09-03T01:57:06.013919+00:00",
   "repo": "dcondrey/unicode-content-binding",
   "labels": [
     {
@@ -50,5 +50,34 @@
     }
   ],
   "issues": [],
-  "pulls": []
+  "pulls": [
+    {
+      "number": 1,
+      "id": "PR_kwDORx7his8AAAABB1KQjA",
+      "title": "Standardize README headers, badges, and best-practices evidence",
+      "url": "https://github.com/dcondrey/unicode-content-binding/pull/1",
+      "state": "MERGED",
+      "author": "dcondrey",
+      "authorAssociation": "OWNER",
+      "assignees": [],
+      "labels": [],
+      "body": "## Summary\n\n- standardize every Markdown README header with a left-aligned logo and adjacent title/description\n- normalize badge geometry and category colors without hardcoding CI/security state colors\n- add or validate repository-local OpenSSF best-practices evidence\n- add only repository-supported CI, security, provenance, coverage, standards, and support badges\n\n## Badge convention\n\nStatic badges use `flat-square` geometry and dark-slate `labelColor=20232a`. Metadata is blue, standards/affiliations are purple, and support/social badges use recognizable brand colors. CI, CodeQL, OpenSSF, coverage, SLSA, and other stateful badges retain service-generated state colors.\n\nThe evidence file is intentionally conservative: criteria not provable from tracked files or repository settings remain unknown or unmet rather than being overstated.",
+      "createdAt": "2026-09-02T01:32:27Z",
+      "updatedAt": "2026-09-02T01:51:45Z",
+      "baseRepository": "dcondrey/unicode-content-binding",
+      "baseRefName": "main",
+      "baseRefOid": "f6343022447e8abbbbe1eb38e176ff7e87684499",
+      "headRepository": "dcondrey/unicode-content-binding",
+      "headRefName": "docs/repository-standards-20260901",
+      "headRefOid": "a31fd18f4222d658b6664a7c8d8f2af348220582",
+      "closedAt": "2026-09-02T01:51:42Z",
+      "mergedAt": "2026-09-02T01:51:42Z",
+      "mergedBy": "dcondrey",
+      "mergeCommit": {
+        "oid": "7bfd7b357002800c22608a89d84c808f9f6d811a"
+      },
+      "comments": [],
+      "reviews": []
+    }
+  ]
 }
