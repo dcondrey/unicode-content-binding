@@ -13,6 +13,15 @@
 
 ---
 
+This is the working area for the individual Internet-Draft *A Conformant Mechanism for
+Content Binding in Text Streams*.
+
+The draft proposes binding metadata to plain-text streams using boundary-delimited transport:
+existing ASCII characters establish the text/non-text boundary, so no new code points are
+needed and no existing Unicode text-processing algorithm changes. It defines the delimiter
+format, the parsing algorithm, a canonicalization procedure, and correctness criteria
+sufficient for two independent implementations to interoperate without coordination.
+
 * [Editor's Copy](https://dcondrey.github.io/unicode-content-binding/#go.draft-condrey-content-binding.html)
 * [Datatracker Page](https://datatracker.ietf.org/doc/draft-condrey-content-binding)
 * [Individual Draft](https://datatracker.ietf.org/doc/html/draft-condrey-content-binding)
